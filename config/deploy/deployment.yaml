@@ -28,7 +28,7 @@ spec:
           image: ghcr.io/brunoh1n1/tsecret:latest
           env:
             - name: TSECRET_INJECTOR_IMAGE
-              value: tsecret:latest
+              value: ghcr.io/brunoh1n1/tsecret:latest
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
