@@ -1,0 +1,7 @@
+bin/
+cover.out
+*.exe
+*.test
+vendor/
+.idea/
+.vscode/

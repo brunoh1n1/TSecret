@@ -1,0 +1,16 @@
+# Manifest de laboratório — TSecretStore Vault (namespace tsecret-test)
+apiVersion: tsecret.io/v1alpha1
+kind: TSecretStore
+metadata:
+  name: vault-backend
+  namespace: tsecret-test
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          key: token
+  refreshInterval: "60s"

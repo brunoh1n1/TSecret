@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tsecret-operator
+  namespace: tsecret-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tsecret-operator
+rules:
+  # TSecret CRDs
+  - apiGroups: ["tsecret.io"]
+    resources:
+      - tsecrets
+      - tsecretstores
+      - clustertsecretstores
+      - tsecretsyncs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["tsecret.io"]
+    resources:
+      - tsecrets/status
+      - tsecretstores/status
+      - clustertsecretstores/status
+      - tsecretsyncs/status
+    verbs: ["get", "update", "patch"]
+  # Secrets and ConfigMaps
+  - apiGroups: [""]
+    resources:
+      - secrets
+      - configmaps
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs: ["create", "patch"]
+  # Pods (for webhook)
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["get", "list", "watch"]
+  # Leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tsecret-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tsecret-operator
+subjects:
+  - kind: ServiceAccount
+    name: tsecret-operator
+    namespace: tsecret-system
