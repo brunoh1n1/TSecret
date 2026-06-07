@@ -394,6 +394,16 @@ kubectl set env deployment/tsecret-operator -n tsecret-system \
   TSECRET_INJECTOR_IMAGE=tsecret:latest
 ```
 
+Manifests de laboratório (namespace `tsecret-test`, Vault in-cluster):
+
+```bash
+kubectl create namespace tsecret-test
+kubectl label namespace tsecret-test tsecret.io/inject=enabled --overwrite
+kubectl apply -f examples/lab/
+```
+
+Arquivos em [`examples/lab/`](examples/lab/) — distintos dos samples genéricos em [`config/samples/`](config/samples/).
+
 Variáveis do operador:
 
 | Variável | Descrição |

@@ -5,3 +5,4 @@ cover.out
 vendor/
 .idea/
 .vscode/
+.kiro/
