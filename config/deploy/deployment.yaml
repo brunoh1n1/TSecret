@@ -25,7 +25,7 @@ spec:
       serviceAccountName: tsecret-operator
       containers:
         - name: manager
-          image: tsecret-operator:latest
+          image: ghcr.io/brunoh1n1/stecret:latest
           env:
             - name: TSECRET_INJECTOR_IMAGE
               value: tsecret:latest
