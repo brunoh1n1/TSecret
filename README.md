@@ -168,11 +168,115 @@ Algoritmos suportados: `xchacha20-poly1305` (recomendado), `chacha20-poly1305`. 
 
 ## Início rápido
 
-### 1. Instalar CRDs e operador
+Fluxo completo **my-app** (namespace `default`):
+
+| Passo | O que faz | README | Manifest / comando |
+|-------|-----------|--------|-------------------|
+| 1 | CRDs + RBAC operador + webhook + label namespace | §1 | `config/crd/`, `config/deploy/rbac.yaml`, `config/deploy/webhook.yaml` |
+| 2 | Certificados TLS + operador | §2 | `config/deploy/bootstrap-webhook-certs.sh`, `config/deploy/deployment.yaml` |
+| 3 | Master key | §3 | `kubectl create secret generic tsecret-master-key ...` |
+| 4 | Vault in-cluster + secrets KV | §4 | `helm install vault ...` + `vault kv put ...` |
+| 5 | Token Vault + TSecretStore + TSecretSync | §5 | `vault-token.yaml`, `tsecretstore-vault.yaml`, `tsecretsync.yaml` |
+| 6 | RBAC do workload | §6 | `config/samples/tsecret-workload-rbac.yaml` |
+| 7 | Deployment my-app | §7 | `config/samples/my-app-deploy.yaml` |
+
+Resumo em um bloco (após Vault e master key prontos):
+
+```bash
+kubectl label namespace default tsecret.io/inject=enabled --overwrite
+kubectl apply -f config/crd/
+kubectl apply -f config/deploy/rbac.yaml
+kubectl apply -f config/deploy/webhook.yaml
+bash config/deploy/bootstrap-webhook-certs.sh
+kubectl apply -f config/deploy/deployment.yaml
+KEY=$(openssl rand -base64 32 | head -c 32)
+kubectl create secret generic tsecret-master-key \
+  --from-literal=encryption-key="$KEY" -n default --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f config/samples/vault-token.yaml
+kubectl apply -f config/samples/tsecretstore-vault.yaml
+kubectl apply -f config/samples/tsecretsync.yaml
+kubectl apply -f config/samples/tsecret-workload-rbac.yaml
+kubectl apply -f config/samples/my-app-deploy.yaml
+```
+
+---
+
+### 1. Instalar CRDs, RBAC e webhook
 
 ```bash
 kubectl apply -f config/crd/
-kubectl apply -f config/deploy/
+kubectl apply -f config/deploy/rbac.yaml
+kubectl apply -f config/deploy/webhook.yaml
+```
+
+### 2. Certificados TLS do webhook (bootstrap obrigatório)
+
+O Deployment monta o Secret `tsecret-webhook-certs` **antes** do container iniciar. O operador gerencia e renova esses certificados em runtime, mas na **primeira instalação** eles precisam existir com antecedência — caso contrário o Pod fica em `FailedMount`:
+
+```
+MountVolume.SetUp failed for volume "webhook-certs" : secret "tsecret-webhook-certs" not found
+```
+
+Gere a CA, o certificado de serving e aplique no cluster:
+
+```bash
+bash config/deploy/bootstrap-webhook-certs.sh
+```
+
+O script cria:
+
+| Recurso | Conteúdo |
+|---------|----------|
+| Secret `tsecret-ca` | CA autoassinada (10 anos) |
+| Secret `tsecret-webhook-certs` | Certificado TLS do webhook (1 ano) |
+| `MutatingWebhookConfiguration` | Campo `caBundle` atualizado com a CA |
+
+Equivalente manual (sem o script):
+
+```bash
+NAMESPACE=tsecret-system
+SERVICE=tsecret-webhook
+TMPDIR=$(mktemp -d)
+
+# CA
+openssl ecparam -name secp384r1 -genkey -noout -out "$TMPDIR/ca.key"
+openssl req -x509 -new -key "$TMPDIR/ca.key" -sha256 -days 3650 \
+  -subj "/CN=TSecret CA/O=TSecret" -out "$TMPDIR/ca.crt"
+
+kubectl create secret tls tsecret-ca \
+  --cert="$TMPDIR/ca.crt" --key="$TMPDIR/ca.key" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+# Serving cert (SANs do Service tsecret-webhook)
+openssl ecparam -name secp384r1 -genkey -noout -out "$TMPDIR/tls.key"
+openssl req -new -key "$TMPDIR/tls.key" \
+  -subj "/CN=${SERVICE}.${NAMESPACE}.svc/O=TSecret" -out "$TMPDIR/tls.csr"
+
+cat > "$TMPDIR/san.cnf" <<EOF
+subjectAltName = DNS:${SERVICE},DNS:${SERVICE}.${NAMESPACE},DNS:${SERVICE}.${NAMESPACE}.svc,DNS:${SERVICE}.${NAMESPACE}.svc.cluster.local
+EOF
+
+openssl x509 -req -in "$TMPDIR/tls.csr" -CA "$TMPDIR/ca.crt" -CAkey "$TMPDIR/ca.key" \
+  -CAcreateserial -out "$TMPDIR/tls.crt" -days 365 -sha256 -extfile "$TMPDIR/san.cnf"
+
+kubectl create secret tls tsecret-webhook-certs \
+  --cert="$TMPDIR/tls.crt" --key="$TMPDIR/tls.key" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+# CA bundle no webhook (API server precisa confiar no certificado de serving)
+CA_BUNDLE=$(base64 -w0 "$TMPDIR/ca.crt" 2>/dev/null || base64 < "$TMPDIR/ca.crt" | tr -d '\n')
+kubectl patch mutatingwebhookconfiguration tsecret-mutating-webhook \
+  --type='json' \
+  -p="[{\"op\": \"replace\", \"path\": \"/webhooks/0/clientConfig/caBundle\", \"value\": \"${CA_BUNDLE}\"}]"
+
+rm -rf "$TMPDIR"
+```
+
+Depois dos certificados, suba o operador:
+
+```bash
+kubectl apply -f config/deploy/deployment.yaml
+kubectl rollout status deployment/tsecret-operator -n tsecret-system
 ```
 
 Habilitar injeção no namespace da app:
@@ -181,7 +285,7 @@ Habilitar injeção no namespace da app:
 kubectl label namespace default tsecret.io/inject=enabled --overwrite
 ```
 
-### 2. Master key (bootstrap)
+### 3. Master key (bootstrap)
 
 ```bash
 KEY=$(openssl rand -base64 32 | head -c 32)
@@ -190,69 +294,58 @@ kubectl create secret generic tsecret-master-key \
   -n default
 ```
 
-### 3. Vault — TSecretStore (testado)
-
-```yaml
-apiVersion: tsecret.io/v1alpha1
-kind: TSecretStore
-metadata:
-  name: vault-backend
-  namespace: default
-spec:
-  provider:
-    vault:
-      server: "http://vault.vault.svc.cluster.local:8200"
-      path: "secret"          # mount KV v2 — NÃO incluir /data
-      auth:
-        tokenSecretRef:
-          name: vault-token
-          key: token
-  refreshInterval: "60s"
-```
+### 4. Vault in-cluster (laboratório)
 
 ```bash
-# No Vault (KV v2)
-vault kv put secret/db-pass value='minha-senha'
-vault kv put secret/db-pass2 value='outra-senha'
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo update hashicorp
+
+kubectl create namespace vault
+helm upgrade --install vault hashicorp/vault -n vault \
+  --set "server.dev.enabled=true" \
+  --set "server.dev.devRootToken=root" \
+  --set "injector.enabled=false" \
+  --wait --timeout 5m
+
+# Habilitar KV v2 no mount secret (dev mode vem com KV v1 por padrão)
+kubectl exec -n vault vault-0 -- vault login root
+kubectl exec -n vault vault-0 -- vault secrets disable secret
+kubectl exec -n vault vault-0 -- vault secrets enable -path=secret kv-v2
+
+# Secrets de teste para o my-app
+kubectl exec -n vault vault-0 -- vault kv put secret/db-pass value='minha-senha'
+kubectl exec -n vault vault-0 -- vault kv put secret/db-pass2 value='outra-senha'
 ```
 
 > O operador monta o path interno como `{path}/data/{key}` → `secret/data/db-pass`.
 
-### 4. TSecretSync
-
-```yaml
-apiVersion: tsecret.io/v1alpha1
-kind: TSecretSync
-metadata:
-  name: db-pass-sync
-  namespace: default
-spec:
-  secretStoreRef:
-    name: vault-backend
-    kind: TSecretStore
-  target:
-    name: db-credentials
-  data:
-    - secretKey: DB_PASSWORD
-      remoteRef:
-        key: db-pass
-        property: value
-    - secretKey: DB_PASSWORD2
-      remoteRef:
-        key: db-pass2
-        property: value
-  refreshInterval: "30s"
-```
-
-### 5. RBAC do workload
-
-O init container lê `TSecret` e `tsecret-master-key` com o ServiceAccount do Pod:
+### 5. TSecretStore + TSecretSync
 
 ```bash
-kubectl apply -f config/samples/tsecret.yaml   # inclui Role tsecret-workload
+kubectl apply -f config/samples/vault-token.yaml
+kubectl apply -f config/samples/tsecretstore-vault.yaml
+kubectl apply -f config/samples/tsecretsync.yaml
 ```
 
-### 6. Usar no Deployment (recomendado: volume)
+Manifests: [`config/samples/vault-token.yaml`](config/samples/vault-token.yaml), [`config/samples/tsecretstore-vault.yaml`](config/samples/tsecretstore-vault.yaml), [`config/samples/tsecretsync.yaml`](config/samples/tsecretsync.yaml)
+
+O operador **cria e atualiza o TSecret automaticamente** — você não precisa aplicar `config/samples/tsecret.yaml` nesse fluxo:
+
+```bash
+kubectl get tsecretsync db-pass-sync -n default
+kubectl get tsecret db-credentials -n default
+# STATUS: Synced / Ready=True
+```
+
+### 6. RBAC do workload
+
+O init container lê o `TSecret` (criado pelo sync) e `tsecret-master-key` com o ServiceAccount do Pod:
+
+```bash
+kubectl apply -f config/samples/tsecret-workload-rbac.yaml
+```
+
+### 7. Usar no Deployment (recomendado: volume)
 
 ```yaml
 apiVersion: apps/v1
@@ -260,30 +353,48 @@ kind: Deployment
 metadata:
   name: my-app
   namespace: default
+  labels:
+    app: my-app
 spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
   template:
+    metadata:
+      labels:
+        app: my-app
     spec:
       serviceAccountName: tsecret-workload
       containers:
         - name: app
-          image: my-app:latest
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cat /var/run/tsecret/db-credentials/DB_PASSWORD && sleep 3600
           volumeMounts:
-            - name: secrets
+            - name: db-credentials
               mountPath: /var/run/tsecret/db-credentials
               readOnly: true
       volumes:
-        - name: secrets
+        - name: db-credentials
           secret:
-            secretName: db-credentials   # referencia TSecret, não Secret K8s
+            secretName: db-credentials   # TSecret criado pelo TSecretSync
 ```
 
 Leitura no container:
 
 ```bash
-cat /var/run/tsecret/db-credentials/DB_PASSWORD
+kubectl exec deploy/my-app -c app -- cat /var/run/tsecret/db-credentials/DB_PASSWORD
 ```
 
-Exemplo completo: [`config/samples/nginx-tsecret-inject.yaml`](config/samples/nginx-tsecret-inject.yaml)
+```bash
+kubectl apply -f config/samples/my-app-deploy.yaml
+```
+
+Manifest completo: [`config/samples/my-app-deploy.yaml`](config/samples/my-app-deploy.yaml)
 
 ---
 
@@ -294,8 +405,8 @@ Por padrão, valores **não** aparecem em `spec.containers[].env`. Para exportar
 ```yaml
 metadata:
   annotations:
-    tsecret.io/export-env: "true"                    # ou tsecret.io/export-env.nginx
-    tsecret.io/entrypoint.nginx: /docker-entrypoint.sh nginx -g 'daemon off;'
+    tsecret.io/export-env: "true"                    # ou tsecret.io/export-env.app
+    tsecret.io/entrypoint.app: sh -c 'exec /app/run.sh'
 ```
 
 O init grava `load-env.sh`; o webhook encapsula o entrypoint:
@@ -311,7 +422,9 @@ set -a; . /var/run/tsecret/db-credentials/load-env.sh; set +a; exec <entrypoint>
 | `tsecret.io/entrypoint` | Pod | Comando após carregar env |
 | `tsecret.io/entrypoint.<container>` | Container | Entrypoint específico |
 
-**Atenção:** apps que fazem `exec` e limpam o ambiente (ex.: nginx como PID 1) podem **não** exibir env em `/proc/1/environ`. Nesses casos, prefira leitura por arquivo ou scripts que façam `source load-env.sh`.
+**Atenção:** apps que fazem `exec` e substituem o processo principal podem **não** exibir env em `/proc/1/environ`. Nesses casos, prefira leitura por arquivo ou `source load-env.sh`.
+
+Exemplo com export env: [`config/samples/my-app-deploy-export-env.yaml`](config/samples/my-app-deploy-export-env.yaml)
 
 ---
 
@@ -373,7 +486,7 @@ TSecret/
 ├── config/
 │   ├── crd/
 │   ├── deploy/               # RBAC, Deployment, Webhook
-│   └── samples/              # Exemplos Vault, nginx, RBAC workload
+│   └── samples/              # Exemplos Vault, my-app, RBAC workload
 ├── Dockerfile                # manager + tsecret-inject
 ├── Makefile
 └── go.mod
@@ -389,20 +502,15 @@ make docker-build IMG=tsecret:latest
 # kind (exemplo)
 kind load docker-image tsecret:latest
 kubectl apply -f config/crd/
-kubectl apply -f config/deploy/
+kubectl apply -f config/deploy/rbac.yaml
+kubectl apply -f config/deploy/webhook.yaml
+bash config/deploy/bootstrap-webhook-certs.sh
+kubectl apply -f config/deploy/deployment.yaml
 kubectl set env deployment/tsecret-operator -n tsecret-system \
   TSECRET_INJECTOR_IMAGE=tsecret:latest
 ```
 
-Manifests de laboratório (namespace `tsecret-test`, Vault in-cluster):
-
-```bash
-kubectl create namespace tsecret-test
-kubectl label namespace tsecret-test tsecret.io/inject=enabled --overwrite
-kubectl apply -f examples/lab/
-```
-
-Arquivos em [`examples/lab/`](examples/lab/) — distintos dos samples genéricos em [`config/samples/`](config/samples/).
+Variante em outro namespace (`tsecret-test`): [`examples/lab/`](examples/lab/) — mesmos recursos, namespace diferente.
 
 Variáveis do operador:
 

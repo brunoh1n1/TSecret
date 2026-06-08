@@ -1,0 +1,36 @@
+# Deployment my-app — export opcional de env em runtime (sem plaintext no spec)
+#
+# Mesmos pré-requisitos de my-app-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: default
+  labels:
+    app: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+      annotations:
+        tsecret.io/export-env: "true"
+        tsecret.io/entrypoint.app: sh -c 'echo DB_PASSWORD=$DB_PASSWORD DB_PASSWORD2=$DB_PASSWORD2 && sleep 3600'
+    spec:
+      serviceAccountName: tsecret-workload
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: db-credentials
+              mountPath: /var/run/tsecret/db-credentials
+              readOnly: true
+      volumes:
+        - name: db-credentials
+          secret:
+            secretName: db-credentials

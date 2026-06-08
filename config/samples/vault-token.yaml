@@ -1,0 +1,9 @@
+# Token do Vault para o TSecretStore (apenas laboratório — Vault dev mode)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-token
+  namespace: default
+type: Opaque
+stringData:
+  token: root
