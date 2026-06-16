@@ -166,20 +166,20 @@ flowchart LR
     subgraph Vault
         KEK[Transit KEK<br/>tsecret-kek]
     end
-    subgraph tsecret-system
+    subgraph tsecret_system["tsecret-system"]
         WRAP[Secret tsecret-wrapped-dek<br/>ciphertext vault:v1:...]
     end
-    subgraph default
+    subgraph app_ns["namespace da app"]
         SYNC[TSecretSync]
         TS[(TSecret<br/>ciphertext)]
         INIT[/tsecret-inject/]
         APP[my-app]
     end
 
-  KEK -->|unwrap DEK| INIT
-  WRAP --> INIT
-  SYNC -->|encrypt com DEK| TS
-  INIT -->|decrypt TSecret| APP
+    KEK -->|unwrap DEK| INIT
+    WRAP --> INIT
+    SYNC -->|encrypt com DEK| TS
+    INIT -->|decrypt TSecret| APP
 ```
 
 1. **KEK** (Key Encryption Key) vive no **Vault Transit** — nunca sai do Vault.
