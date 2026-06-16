@@ -4,7 +4,7 @@
 
 Operador Kubernetes para gerenciamento de secrets com **criptografia real em repouso**, sincronização opcional a cofres externos e **injeção em runtime** via webhook + init container — sem gravar valores decriptados no spec do Pod.
 
-> **Status:** `v1alpha1` — projeto em estágio inicial. Cofre externo **validado em laboratório apenas com HashiCorp Vault**. Providers AWS, Azure, GCP e Oracle existem no código, mas **não foram testados end-to-end** neste repositório.
+> **Status:** `v1alpha1` — projeto em estágio inicial. **Vault KV v2 + Vault Transit** validados end-to-end em laboratório. Providers AWS, Azure, GCP e Oracle existem no código para secret stores, mas **não foram testados end-to-end** neste repositório.
 
 ---
 
@@ -23,6 +23,7 @@ Operador Kubernetes para gerenciamento de secrets com **criptografia real em rep
 2. **Sincroniza de cofres externos** (`TSecretSync` → `TSecret`) sem criar `Secret` Kubernetes nativo.
 3. **Injeta no Pod em runtime** via init container (`/tsecret-inject`): arquivos em **tmpfs (memória)**, não no `spec.containers[].env`.
 4. **Export opcional de env** via annotations — carrega variáveis no processo sem persistir valores no spec.
+5. **Envelope encryption com Vault Transit** — DEK nunca em plaintext no cluster; KEK permanece no Vault.
 
 ---
 
@@ -108,28 +109,16 @@ Cluster
 │   └── MutatingWebhookConfiguration
 │       └── namespaceSelector: tsecret.io/inject=enabled
 │
-└── Namespace: <app>  (ex.: default, tsecret-test)
-    ├── Label no Namespace: tsecret.io/inject=enabled
+└── Namespace: <app>  (ex.: default)
+    ├── Label: tsecret.io/inject=enabled
     │
-    ├── Secret: tsecret-master-key          ← chave simétrica (32 bytes)
+    ├── [Transit] Secret: tsecret-wrapped-dek  ← em tsecret-system (só ciphertext)
+    ├── [Lab]     Secret: tsecret-master-key   ← 32 bytes plaintext (namespace da app)
     │
-    ├── TSecretStore: vault-backend         ← conexão Vault (testado)
-    │   └── auth.tokenSecretRef → vault-token
-    │
-    ├── TSecretSync: db-pass-sync           ← Vault → TSecret
-    │   └── target → TSecret abaixo
-    │
-    ├── TSecret: db-credentials             ← dados criptografados no etcd
-    │   └── spec.data.*.value (ciphertext)
-    │
-    ├── ServiceAccount: tsecret-workload    ← RBAC get tsecrets + secrets
-    ├── Role + RoleBinding
-    │
-    └── Deployment/Pod
-        ├── volume: secret → mutado p/ emptyDir (Memory)
-        ├── initContainer: tsecret-init-*  → /tsecret-inject
-        └── container: volumeMount /var/run/tsecret/<nome>/
-            └── arquivos: DB_PASSWORD, DB_PASSWORD2, load-env.sh (opcional)
+    ├── TSecretStore: vault-backend
+    ├── TSecretSync: db-pass-sync → TSecret db-credentials
+    ├── ServiceAccount: tsecret-workload + RBAC
+    └── Deployment my-app → /var/run/tsecret/db-credentials/
 ```
 
 ---
@@ -151,6 +140,75 @@ tsecret:<algorithm>:<nonce_b64>:<ciphertext_b64>
 
 Algoritmos suportados: `xchacha20-poly1305` (recomendado), `chacha20-poly1305`. AES **não** é suportado (risco de side-channel sem AES-NI).
 
+### Gerenciamento de chaves (`encryptionRef`)
+
+O `TSecret` e o `TSecretSync` referenciam como os valores são cifrados via `spec.encryptionRef`:
+
+| Provider | Uso | Master key no cluster | Status |
+|----------|-----|----------------------|--------|
+| `sealed-secret` | Lab / bootstrap rápido | `Secret` com `encryption-key` em plaintext (32 bytes) | ✅ Testado |
+| `vault-transit` | **Recomendado para produção** | Apenas DEK **embrulhada** (`vault:v1:...`) em `tsecret-system` | ✅ Testado E2E |
+
+#### Modo bootstrap (`sealed-secret`)
+
+```bash
+kubectl create secret generic tsecret-master-key \
+  --from-literal=encryption-key="$(openssl rand -base64 32 | head -c 32)" \
+  -n default
+```
+
+Quem tem `get secrets` no namespace da app **pode ler a chave mestra** e decriptar todos os `TSecret` daquele namespace.
+
+#### Modo Vault Transit (`vault-transit`) — envelope encryption
+
+```mermaid
+flowchart LR
+    subgraph Vault
+        KEK[Transit KEK<br/>tsecret-kek]
+    end
+    subgraph tsecret-system
+        WRAP[Secret tsecret-wrapped-dek<br/>ciphertext vault:v1:...]
+    end
+    subgraph default
+        SYNC[TSecretSync]
+        TS[(TSecret<br/>ciphertext)]
+        INIT[/tsecret-inject/]
+        APP[my-app]
+    end
+
+  KEK -->|unwrap DEK| INIT
+  WRAP --> INIT
+  SYNC -->|encrypt com DEK| TS
+  INIT -->|decrypt TSecret| APP
+```
+
+1. **KEK** (Key Encryption Key) vive no **Vault Transit** — nunca sai do Vault.
+2. **DEK** (Data Encryption Key, 32 bytes) é gerada no bootstrap e **embrulhada** pelo Transit.
+3. No cluster existe só `tsecret-system/tsecret-wrapped-dek` com `ciphertext: vault:v1:...`.
+4. No sync e no init, o operador/inject chama `transit/decrypt` para obter a DEK em memória e cifrar/decifrar os valores do `TSecret`.
+
+Exemplo de `encryptionRef` no `TSecretSync`:
+
+```yaml
+encryptionRef:
+  provider: vault-transit
+  name: tsecret-kek                    # nome da chave no Transit
+  vaultTransit:
+    storeRef:
+      name: vault-backend
+      kind: TSecretStore
+    wrappedKeySecret:
+      name: tsecret-wrapped-dek
+      key: ciphertext
+      namespace: tsecret-system
+```
+
+Bootstrap (uma vez por cluster):
+
+```bash
+bash config/deploy/bootstrap-vault-transit.sh
+```
+
 ---
 
 ## Componentes do operador
@@ -162,25 +220,42 @@ Algoritmos suportados: `xchacha20-poly1305` (recomendado), `chacha20-poly1305`. 
 | `TSecretSyncReconciler` | Sync cofre → `TSecret` (all-or-nothing por reconcile) |
 | **Mutating Webhook** | Estrutura o Pod: tmpfs + init; **não decripta** |
 | **`/tsecret-inject`** | Init container: decripta em runtime e escreve arquivos |
+| **KeyResolver** | Resolve DEK: `sealed-secret` (Secret) ou `vault-transit` (Transit unwrap) |
 | **CertManager** | TLS auto-assinado para webhook (estilo Kyverno) |
 
 ---
 
 ## Início rápido
 
-Fluxo completo **my-app** (namespace `default`):
+Dois caminhos para o fluxo **my-app** (namespace `default`):
 
-| Passo | O que faz | README | Manifest / comando |
-|-------|-----------|--------|-------------------|
-| 1 | CRDs + RBAC operador + webhook + label namespace | §1 | `config/crd/`, `config/deploy/rbac.yaml`, `config/deploy/webhook.yaml` |
-| 2 | Certificados TLS + operador | §2 | `config/deploy/bootstrap-webhook-certs.sh`, `config/deploy/deployment.yaml` |
-| 3 | Master key | §3 | `kubectl create secret generic tsecret-master-key ...` |
-| 4 | Vault in-cluster + secrets KV | §4 | `helm install vault ...` + `vault kv put ...` |
-| 5 | Token Vault + TSecretStore + TSecretSync | §5 | `vault-token.yaml`, `tsecretstore-vault.yaml`, `tsecretsync.yaml` |
-| 6 | RBAC do workload | §6 | `config/samples/tsecret-workload-rbac.yaml` |
-| 7 | Deployment my-app | §7 | `config/samples/my-app-deploy.yaml` |
+| Passo | Lab (`sealed-secret`) | Produção (`vault-transit`) |
+|-------|----------------------|----------------------------|
+| 1–2 | CRDs, webhook, operador, label namespace | Igual |
+| 3 | Master key plaintext (`tsecret-master-key`) | `bootstrap-vault-transit.sh` |
+| 4 | Vault in-cluster + KV secrets | Igual |
+| 5 | `tsecretsync.yaml` | `tsecretsync-vault-transit.yaml` |
+| 6 | `tsecret-workload-rbac.yaml` | `tsecret-workload-rbac-transit.yaml` |
+| 7 | `my-app-deploy.yaml` | Igual |
 
-Resumo em um bloco (após Vault e master key prontos):
+### Resumo — Vault Transit (recomendado)
+
+```bash
+kubectl label namespace default tsecret.io/inject=enabled --overwrite
+kubectl apply -f config/crd/
+kubectl apply -f config/deploy/rbac.yaml
+kubectl apply -f config/deploy/webhook.yaml
+bash config/deploy/bootstrap-webhook-certs.sh
+kubectl apply -f config/deploy/deployment.yaml
+kubectl apply -f config/samples/vault-token.yaml
+kubectl apply -f config/samples/tsecretstore-vault.yaml
+bash config/deploy/bootstrap-vault-transit.sh
+kubectl apply -f config/samples/tsecretsync-vault-transit.yaml
+kubectl apply -f config/samples/tsecret-workload-rbac-transit.yaml
+kubectl apply -f config/samples/my-app-deploy.yaml
+```
+
+### Resumo — bootstrap rápido (lab)
 
 ```bash
 kubectl label namespace default tsecret.io/inject=enabled --overwrite
@@ -285,7 +360,17 @@ Habilitar injeção no namespace da app:
 kubectl label namespace default tsecret.io/inject=enabled --overwrite
 ```
 
-### 3. Master key (bootstrap)
+### 3. Chave de criptografia
+
+**Opção A — Vault Transit (recomendado):** sem master key em plaintext no namespace da app.
+
+```bash
+bash config/deploy/bootstrap-vault-transit.sh
+```
+
+Cria Transit KEK `tsecret-kek` no Vault e `tsecret-system/tsecret-wrapped-dek` (só ciphertext).
+
+**Opção B — bootstrap (`sealed-secret`):** apenas para lab.
 
 ```bash
 KEY=$(openssl rand -base64 32 | head -c 32)
@@ -324,25 +409,46 @@ kubectl exec -n vault vault-0 -- vault kv put secret/db-pass2 value='outra-senha
 ```bash
 kubectl apply -f config/samples/vault-token.yaml
 kubectl apply -f config/samples/tsecretstore-vault.yaml
+```
+
+**Vault Transit (recomendado):**
+
+```bash
+kubectl apply -f config/samples/tsecretsync-vault-transit.yaml
+```
+
+**Bootstrap (`sealed-secret`):**
+
+```bash
 kubectl apply -f config/samples/tsecretsync.yaml
 ```
 
-Manifests: [`config/samples/vault-token.yaml`](config/samples/vault-token.yaml), [`config/samples/tsecretstore-vault.yaml`](config/samples/tsecretstore-vault.yaml), [`config/samples/tsecretsync.yaml`](config/samples/tsecretsync.yaml)
+Manifests: [`vault-token.yaml`](config/samples/vault-token.yaml), [`tsecretstore-vault.yaml`](config/samples/tsecretstore-vault.yaml), [`tsecretsync-vault-transit.yaml`](config/samples/tsecretsync-vault-transit.yaml), [`tsecretsync.yaml`](config/samples/tsecretsync.yaml)
 
-O operador **cria e atualiza o TSecret automaticamente** — você não precisa aplicar `config/samples/tsecret.yaml` nesse fluxo:
+O operador **cria e atualiza o TSecret automaticamente** — não aplique `config/samples/tsecret.yaml` nesse fluxo:
 
 ```bash
 kubectl get tsecretsync db-pass-sync -n default
 kubectl get tsecret db-credentials -n default
 # STATUS: Synced / Ready=True
+kubectl get tsecret db-credentials -n default -o jsonpath='{.spec.encryptionRef.provider}'
+# vault-transit  (ou sealed-secret no modo lab)
 ```
 
 ### 6. RBAC do workload
 
-O init container lê o `TSecret` (criado pelo sync) e `tsecret-master-key` com o ServiceAccount do Pod:
+O init container lê o `TSecret` (criado pelo sync) com o ServiceAccount do Pod.
+
+**Modo bootstrap** (`sealed-secret`):
 
 ```bash
 kubectl apply -f config/samples/tsecret-workload-rbac.yaml
+```
+
+**Modo Vault Transit** (sem plaintext master key):
+
+```bash
+kubectl apply -f config/samples/tsecret-workload-rbac-transit.yaml
 ```
 
 ### 7. Usar no Deployment (recomendado: volume)
@@ -444,27 +550,30 @@ Todas exigem que o nome aponte para um **TSecret** no mesmo namespace.
 
 ### Segurança
 
-- **Master key** (`tsecret-master-key`): quem controla essa Secret controla todos os TSecrets do namespace. Proteja e rotacione com processo formal.
-- **Valores decriptados** existem em **tmpfs** dentro do Pod em execução — visíveis a quem tem `exec` no container ou acesso ao nó (threat model padrão de secrets em memória).
-- **Spec do Pod permanece limpo** — sem senhas em `env` nem scripts com literals no init; decriptação ocorre só no processo `/tsecret-inject`.
-- **`failurePolicy: Fail`** — se o webhook ou init falhar, o Pod **não sobe** (fail-closed).
-- **Webhook por namespace** — só namespaces com `tsecret.io/inject=enabled` são mutados.
-- **Sync all-or-nothing** — se uma chave falhar no Vault, **nenhuma** chave é atualizada no `TSecret` alvo.
-- **Health check do Vault** usa `/v1/sys/health` (sem auth) — store pode aparecer `Available` mesmo com token inválido; falhas aparecem no `TSecretSync`.
+- **Modo `sealed-secret`:** quem controla `tsecret-master-key` controla todos os `TSecret` do namespace. Prefira **`vault-transit`** em produção.
+- **Modo `vault-transit`:** a DEK em plaintext **não** fica no cluster — só `vault:v1:...` em `tsecret-system`. O KEK nunca sai do Vault. O token Vault (`vault-token`) ainda precisa de RBAC restrito.
+- **Valores decriptados** existem em **tmpfs** no Pod em execução — threat model padrão de secrets em memória.
+- **Spec do Pod permanece limpo** — decriptação só no `/tsecret-inject`.
+- **`failurePolicy: Fail`** — webhook/init falhando impede criação do Pod.
+- **Webhook por namespace** — só namespaces com `tsecret.io/inject=enabled`.
+- **Sync all-or-nothing** — uma chave falhando no Vault bloqueia atualização do `TSecret` alvo.
+- **Complementar à encryption at rest do Kubernetes** — o TSecret cifra no CRD e controla acesso via RBAC; encryption at rest do apiserver protege o etcd. [Documentação K8s](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/).
 
 ### Operacional
 
 - **Vault KV v2:** use `path: "secret"` (mount), não `secret/data`.
-- **Token Vault:** operador lê `tokenSecretRef` no sync; configure RBAC do SA do Pod para o init ler `TSecret` + master key.
-- **Imagem do inject:** variável `TSECRET_INJECTOR_IMAGE` no operador (default `tsecret:latest`); mesma imagem contém `/manager` e `/tsecret-inject`.
-- **Providers não testados:** AWS, Azure, GCP, Oracle — use com cautela até validação em ambiente real.
+- **Vault Transit:** rode `bootstrap-vault-transit.sh` antes do sync com `tsecretsync-vault-transit.yaml`.
+- **Token Vault:** restrinja RBAC; em produção use policy Vault com `transit/decrypt` mínimo.
+- **Imagem do inject:** `TSECRET_INJECTOR_IMAGE` no operador; mesma imagem contém `/manager` e `/tsecret-inject`.
+- **Providers não testados:** AWS, Azure, GCP, Oracle — código presente, sem E2E.
 
 ### Limitações conhecidas (`v1alpha1`)
 
-- Auth Vault: apenas `tokenSecretRef` implementado (Kubernetes auth / AppRole planejados).
+- Auth Vault: apenas `tokenSecretRef` (Kubernetes auth / AppRole planejados).
+- `vault-transit`: token Vault ainda necessário para unwrap (policy pode ser restrita).
+- AWS/Azure/GCP KMS providers: não implementados (apenas `sealed-secret` e `vault-transit`).
 - Sem Helm chart oficial; manifests em `config/deploy/`.
-- Sem CLI `tsecret encrypt` (roadmap).
-- Rotação automática de chaves não implementada.
+- Rotação automática de DEK/KEK não implementada.
 
 ---
 
@@ -474,19 +583,20 @@ Todas exigem que o nome aponte para um **TSecret** no mesmo namespace.
 TSecret/
 ├── cmd/
 │   ├── manager/main.go       # Operador + webhook
-│   └── inject/main.go        # Init container (/tsecret-inject)
+│   ├── inject/main.go        # Init container (/tsecret-inject)
+│   └── encrypt/main.go       # CLI para TSecret manual
 ├── pkg/
 │   ├── apis/v1alpha1/        # CRD types
 │   ├── controller/           # Reconcilers
 │   ├── crypto/               # Encrypt / Decrypt
 │   ├── inject/               # Escrita runtime em tmpfs
-│   ├── providers/            # Vault, AWS, Azure, GCP, Oracle
-│   ├── webhook/              # Mutação estrutural do Pod
+│   ├── providers/            # Vault KV, Vault Transit, AWS, Azure, GCP, Oracle
+│   ├── webhook/              # Mutação + KeyResolver
 │   └── certs/                # TLS do webhook
 ├── config/
 │   ├── crd/
-│   ├── deploy/               # RBAC, Deployment, Webhook
-│   └── samples/              # Exemplos Vault, my-app, RBAC workload
+│   ├── deploy/               # RBAC, webhook bootstrap, vault-transit bootstrap
+│   └── samples/              # my-app, vault-transit, RBAC
 ├── Dockerfile                # manager + tsecret-inject
 ├── Makefile
 └── go.mod
@@ -524,12 +634,12 @@ Variáveis do operador:
 ## Roadmap
 
 - [ ] Helm chart
-- [ ] Rotação automática de chaves
+- [ ] Rotação automática de DEK/KEK
 - [ ] Métricas Prometheus
-- [ ] CLI `tsecret encrypt`
-- [ ] Vault Kubernetes auth / AppRole
-- [ ] Testes E2E para AWS, Azure, GCP, Oracle
-- [ ] Publicação GHCR (`ghcr.io/...`)
+- [ ] Vault Kubernetes auth / AppRole (token com policy `transit/decrypt` mínima)
+- [ ] AWS / Azure / GCP KMS como providers de `encryptionRef`
+- [ ] Testes E2E para AWS, Azure, GCP, Oracle (secret stores)
+- [ ] Publicação GHCR versionada por release
 
 ---
 

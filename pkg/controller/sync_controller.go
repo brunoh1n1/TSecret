@@ -61,6 +61,7 @@ func (r *TSecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Pull secrets from provider
+	encRef := defaultEncryptionRef(sync)
 	data := make(map[string]v1alpha1.TSecretEntry)
 	for _, item := range sync.Spec.Data {
 		value, err := provider.GetSecret(ctx, item.RemoteRef.Key, item.RemoteRef.Property)
@@ -69,13 +70,6 @@ func (r *TSecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			r.setSyncStatus(ctx, sync, "SyncFailed", "PullFailed",
 				fmt.Sprintf("failed to pull %s: %v", item.RemoteRef.Key, err))
 			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
-		}
-
-		// Encrypt the value
-		// Use default encryption ref from the sync or a configured one
-		encRef := v1alpha1.EncryptionRef{
-			Provider: "sealed-secret",
-			Name:     "tsecret-master-key",
 		}
 
 		key, err := r.KeyResolver.ResolveKey(ctx, encRef, req.Namespace)
@@ -117,11 +111,8 @@ func (r *TSecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				},
 			},
 			Spec: v1alpha1.TSecretSpec{
-				EncryptionRef: v1alpha1.EncryptionRef{
-					Provider: "sealed-secret",
-					Name:     "tsecret-master-key",
-				},
-				Data: data,
+				EncryptionRef: encRef,
+				Data:          data,
 			},
 		}
 		if err := r.Create(ctx, target); err != nil {
@@ -131,6 +122,7 @@ func (r *TSecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	} else {
 		// Update existing
 		target.Spec.Data = data
+		target.Spec.EncryptionRef = encRef
 		if err := r.Update(ctx, target); err != nil {
 			r.setSyncStatus(ctx, sync, "SyncFailed", "UpdateFailed", err.Error())
 			return ctrl.Result{RequeueAfter: 60 * time.Second}, nil
@@ -230,4 +222,14 @@ func parseDuration(s string, defaultVal time.Duration) time.Duration {
 		return defaultVal
 	}
 	return d
+}
+
+func defaultEncryptionRef(sync *v1alpha1.TSecretSync) v1alpha1.EncryptionRef {
+	if sync.Spec.EncryptionRef != nil {
+		return *sync.Spec.EncryptionRef
+	}
+	return v1alpha1.EncryptionRef{
+		Provider: "sealed-secret",
+		Name:     "tsecret-master-key",
+	}
 }

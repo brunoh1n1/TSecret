@@ -227,13 +227,22 @@ func (in *TSecretSyncList) DeepCopyObject() runtime.Object {
 
 func (in *TSecretSpec) DeepCopyInto(out *TSecretSpec) {
 	*out = *in
-	out.EncryptionRef = in.EncryptionRef
+	in.EncryptionRef.DeepCopyInto(&out.EncryptionRef)
 	if in.Data != nil {
 		in, out := &in.Data, &out.Data
 		*out = make(map[string]TSecretEntry, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}
+	}
+}
+
+func (in *EncryptionRef) DeepCopyInto(out *EncryptionRef) {
+	*out = *in
+	if in.VaultTransit != nil {
+		in, out := &in.VaultTransit, &out.VaultTransit
+		*out = new(VaultTransitRef)
+		**out = **in
 	}
 }
 
@@ -309,6 +318,11 @@ func (in *TSecretSyncSpec) DeepCopyInto(out *TSecretSyncSpec) {
 		in, out := &in.Data, &out.Data
 		*out = make([]TSecretSyncData, len(*in))
 		copy(*out, *in)
+	}
+	if in.EncryptionRef != nil {
+		in, out := &in.EncryptionRef, &out.EncryptionRef
+		*out = new(EncryptionRef)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

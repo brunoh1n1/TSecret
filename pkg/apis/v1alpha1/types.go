@@ -34,11 +34,25 @@ type EncryptionRef struct {
 	// Provider is the key provider type (sealed-secret, aws-kms, azure-keyvault, gcp-kms, vault-transit).
 	Provider string `json:"provider"`
 
-	// Name is the name of the key or key reference in the provider.
+	// Name is the key or key reference in the provider.
+	// For sealed-secret: Kubernetes Secret name holding the raw 32-byte DEK.
+	// For vault-transit: Vault Transit key name (KEK).
 	Name string `json:"name"`
 
-	// Namespace is optional; if empty, uses the TSecret's namespace.
+	// Namespace is optional; if empty, uses the TSecret's namespace (sealed-secret only).
 	Namespace string `json:"namespace,omitempty"`
+
+	// VaultTransit configures envelope encryption via HashiCorp Vault Transit.
+	VaultTransit *VaultTransitRef `json:"vaultTransit,omitempty"`
+}
+
+// VaultTransitRef configures DEK unwrapping via Vault Transit.
+type VaultTransitRef struct {
+	// StoreRef points to the TSecretStore/ClusterTSecretStore used to reach Vault.
+	StoreRef SecretStoreRef `json:"storeRef"`
+
+	// WrappedKeySecret holds the Transit-encrypted DEK (field ciphertext).
+	WrappedKeySecret SecretKeyRef `json:"wrappedKeySecret"`
 }
 
 // TSecretStatus defines the observed state of TSecret.
@@ -319,6 +333,10 @@ type TSecretSyncSpec struct {
 
 	// RefreshInterval defines how often to sync (e.g., "1h", "30m"). Min: 30s, Max: 24h.
 	RefreshInterval string `json:"refreshInterval,omitempty"`
+
+	// EncryptionRef overrides how pulled values are encrypted into the target TSecret.
+	// Defaults to sealed-secret / tsecret-master-key in the sync namespace.
+	EncryptionRef *EncryptionRef `json:"encryptionRef,omitempty"`
 }
 
 // SecretStoreRef references a TSecretStore or ClusterTSecretStore.
