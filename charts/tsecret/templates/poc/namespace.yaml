@@ -1,0 +1,9 @@
+{{- if and .Values.poc.enabled .Values.poc.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "tsecret.pocNamespace" . }}
+  labels:
+    {{ .Values.injection.labelKey }}: {{ .Values.injection.labelValue | quote }}
+    {{- include "tsecret.labels" . | nindent 4 }}
+{{- end }}

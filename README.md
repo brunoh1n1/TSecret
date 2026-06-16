@@ -227,7 +227,57 @@ bash config/deploy/bootstrap-vault-transit.sh
 
 ## Início rápido
 
-Dois caminhos para o fluxo **my-app** (namespace `default`):
+### Helm (recomendado)
+
+```bash
+helm repo add tsecret https://brunoh1n1.github.io/TSecret
+helm repo update
+
+# Operador apenas (produção)
+helm upgrade --install tsecret tsecret/tsecret \
+  --namespace tsecret-system \
+  --create-namespace \
+  --set injection.enabled=true \
+  --set 'injection.namespaces={default}'
+```
+
+O chart instala CRDs, RBAC, webhook e operador. **TLS do webhook é gerenciado pelo operador** — não é necessário `bootstrap-webhook-certs.sh`.
+
+Documentação completa do chart: [`charts/tsecret/README.md`](charts/tsecret/README.md)
+
+**PoC com Vault** (Vault **não** vem no chart — instale separadamente ou use o seu):
+
+```bash
+# 1) Vault dev (lab, release separado)
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm upgrade --install vault hashicorp/vault -n vault --create-namespace \
+  --set "server.dev.enabled=true" \
+  --set "server.dev.devRootToken=root" \
+  --set "injector.enabled=false" \
+  --wait --timeout 5m
+
+# 2) TSecret com demo (Transit + my-app)
+helm upgrade --install tsecret tsecret/tsecret -n tsecret-system --create-namespace \
+  --set poc.enabled=true \
+  --set poc.encryption.mode=vault-transit \
+  --set poc.vault.existing.address="http://vault.vault.svc.cluster.local:8200"
+```
+
+**External Secrets** (opcional): o chart pode renderizar `ExternalSecret` para o token Vault se você já tiver o [ESO](https://external-secrets.io) no cluster — ver `poc.externalSecrets` em [`charts/tsecret/values.yaml`](charts/tsecret/values.yaml).
+
+Instalação local do chart:
+
+```bash
+make helm-install
+# ou PoC:
+make helm-install-poc
+```
+
+Publicação: [Artifact Hub](https://artifacthub.io) via GitHub Pages (`brunoh1n1.github.io/TSecret`) — workflow `.github/workflows/release-chart.yaml` no tag `v*`.
+
+---
+
+Dois caminhos **manuais** (manifests) para o fluxo **my-app** (namespace `default`):
 
 | Passo | Lab (`sealed-secret`) | Produção (`vault-transit`) |
 |-------|----------------------|----------------------------|
@@ -572,7 +622,6 @@ Todas exigem que o nome aponte para um **TSecret** no mesmo namespace.
 - Auth Vault: apenas `tokenSecretRef` (Kubernetes auth / AppRole planejados).
 - `vault-transit`: token Vault ainda necessário para unwrap (policy pode ser restrita).
 - AWS/Azure/GCP KMS providers: não implementados (apenas `sealed-secret` e `vault-transit`).
-- Sem Helm chart oficial; manifests em `config/deploy/`.
 - Rotação automática de DEK/KEK não implementada.
 
 ---
@@ -597,6 +646,7 @@ TSecret/
 │   ├── crd/
 │   ├── deploy/               # RBAC, webhook bootstrap, vault-transit bootstrap
 │   └── samples/              # my-app, vault-transit, RBAC
+├── charts/tsecret/           # Helm chart (Artifact Hub)
 ├── Dockerfile                # manager + tsecret-inject
 ├── Makefile
 └── go.mod
@@ -633,7 +683,7 @@ Variáveis do operador:
 
 ## Roadmap
 
-- [ ] Helm chart
+- [x] Helm chart
 - [ ] Rotação automática de DEK/KEK
 - [ ] Métricas Prometheus
 - [ ] Vault Kubernetes auth / AppRole (token com policy `transit/decrypt` mínima)

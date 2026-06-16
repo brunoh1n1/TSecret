@@ -1,0 +1,59 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tsecret.fullname" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["tsecret.io"]
+    resources:
+      - tsecrets
+      - tsecretstores
+      - clustertsecretstores
+      - tsecretsyncs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["tsecret.io"]
+    resources:
+      - tsecrets/status
+      - tsecretstores/status
+      - clustertsecretstores/status
+      - tsecretsyncs/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources:
+      - secrets
+      - configmaps
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - mutatingwebhookconfigurations
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tsecret.fullname" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "tsecret.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ include "tsecret.namespace" . }}
+{{- end }}

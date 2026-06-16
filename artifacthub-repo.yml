@@ -1,0 +1,9 @@
+# Artifact Hub repository metadata.
+# After the first chart release, claim this repository at https://artifacthub.io
+# using the repository URL: https://brunoh1n1.github.io/TSecret
+#
+# repositoryID: generate at https://artifacthub.io/control-panel/repositories (optional until claim)
+repositoryID: 00000000-0000-0000-0000-000000000001
+owners:
+  - name: brunoh1n1
+    email: brunoh1n1@users.noreply.github.com

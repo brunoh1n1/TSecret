@@ -1,0 +1,81 @@
+apiVersion: v2
+name: tsecret
+description: Kubernetes operator for encrypted secrets at rest with Vault sync and runtime injection
+type: application
+version: 0.1.3
+appVersion: "0.1.3"
+kubeVersion: ">= 1.25.0-0"
+home: https://github.com/brunoh1n1/TSecret
+sources:
+  - https://github.com/brunoh1n1/TSecret
+maintainers:
+  - name: brunoh1n1
+    url: https://github.com/brunoh1n1
+keywords:
+  - secrets
+  - encryption
+  - vault
+  - security
+  - operator
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: security
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Basic Install
+  artifacthub.io/crds: |
+    - kind: TSecret
+      version: v1alpha1
+      name: tsecrets.tsecret.io
+      displayName: TSecret
+      description: Encrypted secret stored as a CRD
+    - kind: TSecretStore
+      version: v1alpha1
+      name: tsecretstores.tsecret.io
+      displayName: TSecretStore
+      description: Connection to an external secret backend
+    - kind: ClusterTSecretStore
+      version: v1alpha1
+      name: clustertsecretstores.tsecret.io
+      displayName: ClusterTSecretStore
+      description: Cluster-scoped secret store
+    - kind: TSecretSync
+      version: v1alpha1
+      name: tsecretsyncs.tsecret.io
+      displayName: TSecretSync
+      description: Sync remote secrets into encrypted TSecrets
+  artifacthub.io/crdsExamples: |
+    - apiVersion: tsecret.io/v1alpha1
+      kind: TSecretStore
+      metadata:
+        name: vault-backend
+        namespace: default
+      spec:
+        provider:
+          vault:
+            server: "https://vault.example.com:8200"
+            path: secret
+            auth:
+              tokenSecretRef:
+                name: vault-token
+                key: token
+        refreshInterval: "60s"
+    - apiVersion: tsecret.io/v1alpha1
+      kind: TSecretSync
+      metadata:
+        name: db-pass-sync
+        namespace: default
+      spec:
+        secretStoreRef:
+          name: vault-backend
+          kind: TSecretStore
+        target:
+          name: db-credentials
+        encryptionRef:
+          provider: vault-transit
+          name: tsecret-kek
+        data:
+          - secretKey: DB_PASSWORD
+            remoteRef:
+              key: db-pass
+              property: value

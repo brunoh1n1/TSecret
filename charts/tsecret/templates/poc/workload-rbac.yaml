@@ -1,0 +1,80 @@
+{{- if and .Values.poc.enabled .Values.poc.workload.createRBAC }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.poc.workload.serviceAccountName }}
+  namespace: {{ include "tsecret.pocNamespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-workload
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.poc.workload.serviceAccountName }}
+  namespace: {{ include "tsecret.pocNamespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-workload
+rules:
+  - apiGroups: ["tsecret.io"]
+    resources: ["tsecrets"]
+    verbs: ["get"]
+  - apiGroups: ["tsecret.io"]
+    resources: ["tsecretstores"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ .Values.poc.vault.auth.existingSecret.name }}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.poc.workload.serviceAccountName }}
+  namespace: {{ include "tsecret.pocNamespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-workload
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.poc.workload.serviceAccountName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.poc.workload.serviceAccountName }}
+    namespace: {{ include "tsecret.pocNamespace" . }}
+{{- if eq .Values.poc.encryption.mode "vault-transit" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.poc.workload.serviceAccountName }}-wrapped-dek
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-workload
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ .Values.poc.vault.transitBootstrap.wrappedSecretName }}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.poc.workload.serviceAccountName }}-wrapped-dek
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-workload
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.poc.workload.serviceAccountName }}-wrapped-dek
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.poc.workload.serviceAccountName }}
+    namespace: {{ include "tsecret.pocNamespace" . }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,31 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ .Values.webhook.name }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+webhooks:
+  - name: tsecret-injector.tsecret.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    clientConfig:
+      service:
+        name: {{ .Values.webhook.serviceName }}
+        namespace: {{ include "tsecret.namespace" . }}
+        path: /mutate-pods
+        port: {{ .Values.webhook.servicePort }}
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: {{ .Values.injection.labelKey | quote }}
+          operator: In
+          values:
+            - {{ .Values.injection.labelValue | quote }}
+{{- end }}

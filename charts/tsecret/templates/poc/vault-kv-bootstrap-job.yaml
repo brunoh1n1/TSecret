@@ -1,0 +1,108 @@
+{{- if and .Values.poc.enabled .Values.poc.vault.kvBootstrap.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tsecret.fullname" . }}-vault-bootstrap
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-vault-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tsecret.fullname" . }}-vault-bootstrap
+  namespace: {{ .Values.poc.vault.existing.namespace }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-vault-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tsecret.fullname" . }}-vault-bootstrap
+  namespace: {{ .Values.poc.vault.existing.namespace }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-vault-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tsecret.fullname" . }}-vault-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tsecret.fullname" . }}-vault-bootstrap
+    namespace: {{ include "tsecret.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tsecret.fullname" . }}-vault-kv-bootstrap
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-vault-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: poc-vault-bootstrap
+    spec:
+      serviceAccountName: {{ include "tsecret.fullname" . }}-vault-bootstrap
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: bitnami/kubectl:1.30
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VAULT_NS
+              value: {{ .Values.poc.vault.existing.namespace | quote }}
+            - name: VAULT_POD
+              value: {{ .Values.poc.vault.existing.pod | quote }}
+            - name: VAULT_TOKEN
+              value: {{ .Values.poc.vault.auth.token | quote }}
+            - name: KV_MOUNT
+              value: {{ .Values.poc.vault.existing.kvMount | quote }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              echo "Waiting for Vault pod ${VAULT_POD} in ${VAULT_NS}..."
+              until kubectl get pod -n "${VAULT_NS}" "${VAULT_POD}" >/dev/null 2>&1; do sleep 3; done
+              kubectl wait --for=condition=Ready pod/"${VAULT_POD}" -n "${VAULT_NS}" --timeout=300s
+
+              vault_exec() {
+                kubectl exec -n "${VAULT_NS}" "${VAULT_POD}" -- vault "$@"
+              }
+
+              vault_exec login "${VAULT_TOKEN}" >/dev/null
+              vault_exec secrets disable "${KV_MOUNT}" 2>/dev/null || true
+              vault_exec secrets enable -path="${KV_MOUNT}" kv-v2
+
+              {{- range .Values.poc.vault.kvBootstrap.secrets }}
+              vault_exec kv put {{ $.Values.poc.vault.existing.kvMount }}/{{ .path }} value={{ .value | quote }}
+              {{- end }}
+
+              echo "Vault KV bootstrap complete."
+{{- end }}

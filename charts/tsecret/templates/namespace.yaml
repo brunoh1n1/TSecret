@@ -1,0 +1,8 @@
+{{- if .Values.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+{{- end }}

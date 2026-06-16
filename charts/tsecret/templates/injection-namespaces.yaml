@@ -1,0 +1,11 @@
+{{- if .Values.injection.enabled }}
+{{- range .Values.injection.namespaces }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ . | quote }}
+  labels:
+    {{ $.Values.injection.labelKey }}: {{ $.Values.injection.labelValue | quote }}
+---
+{{- end }}
+{{- end }}

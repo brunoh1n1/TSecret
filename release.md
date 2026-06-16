@@ -93,7 +93,22 @@ spec:
 
 ---
 
-## Instalação rápida (Vault Transit)
+## Instalação rápida (Helm)
+
+```bash
+helm repo add tsecret https://brunoh1n1.github.io/TSecret
+helm repo update
+
+helm upgrade --install tsecret tsecret/tsecret \
+  --namespace tsecret-system \
+  --create-namespace \
+  --set injection.enabled=true \
+  --set 'injection.namespaces={default}'
+```
+
+Chart: [`charts/tsecret/`](charts/tsecret/) — Vault e External Secrets **não** vêm no chart; PoC opcional via `poc.enabled=true`. Ver [`charts/tsecret/README.md`](charts/tsecret/README.md).
+
+### Instalação rápida (manifests — Vault Transit)
 
 ```bash
 # Operador

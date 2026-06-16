@@ -1,0 +1,153 @@
+{{- if and .Values.poc.enabled .Values.poc.vault.transitBootstrap.enabled (eq .Values.poc.encryption.mode "vault-transit") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-transit-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap
+  namespace: {{ .Values.poc.vault.existing.namespace }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-transit-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap
+  namespace: {{ .Values.poc.vault.existing.namespace }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-transit-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tsecret.fullname" . }}-transit-bootstrap
+    namespace: {{ include "tsecret.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap-secrets
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-transit-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap-secrets
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-transit-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tsecret.fullname" . }}-transit-bootstrap-secrets
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tsecret.fullname" . }}-transit-bootstrap
+    namespace: {{ include "tsecret.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tsecret.fullname" . }}-vault-transit-bootstrap
+  namespace: {{ include "tsecret.namespace" . }}
+  labels:
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-transit-bootstrap
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: poc-transit-bootstrap
+    spec:
+      serviceAccountName: {{ include "tsecret.fullname" . }}-transit-bootstrap
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: bitnami/kubectl:1.30
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VAULT_NS
+              value: {{ .Values.poc.vault.existing.namespace | quote }}
+            - name: VAULT_POD
+              value: {{ .Values.poc.vault.existing.pod | quote }}
+            - name: VAULT_TOKEN
+              value: {{ .Values.poc.vault.auth.token | quote }}
+            - name: TRANSIT_KEY
+              value: {{ .Values.poc.vault.transitBootstrap.keyName | quote }}
+            - name: WRAPPED_SECRET
+              value: {{ .Values.poc.vault.transitBootstrap.wrappedSecretName | quote }}
+            - name: TSECRET_NS
+              value: {{ include "tsecret.namespace" . | quote }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              echo "Waiting for Vault pod ${VAULT_POD} in ${VAULT_NS}..."
+              until kubectl get pod -n "${VAULT_NS}" "${VAULT_POD}" >/dev/null 2>&1; do sleep 3; done
+              kubectl wait --for=condition=Ready pod/"${VAULT_POD}" -n "${VAULT_NS}" --timeout=300s
+
+              vault_exec() {
+                kubectl exec -n "${VAULT_NS}" "${VAULT_POD}" -- vault "$@"
+              }
+
+              vault_exec login "${VAULT_TOKEN}" >/dev/null
+              vault_exec secrets enable transit 2>/dev/null || true
+              vault_exec write -f "transit/keys/${TRANSIT_KEY}" >/dev/null
+
+              DEK_B64="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+              CIPHERTEXT="$(vault_exec write -format=json "transit/encrypt/${TRANSIT_KEY}" "plaintext=${DEK_B64}" | tr -d '\n' | sed 's/.*"ciphertext":"//;s/".*//')"
+
+              kubectl create secret generic "${WRAPPED_SECRET}" \
+                --from-literal=ciphertext="${CIPHERTEXT}" \
+                -n "${TSECRET_NS}" --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "Transit bootstrap complete: ${TSECRET_NS}/${WRAPPED_SECRET}"
+{{- end }}

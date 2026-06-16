@@ -1,0 +1,42 @@
+{{- if and .Values.poc.enabled .Values.poc.sampleApp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.poc.sampleApp.name }}
+  namespace: {{ include "tsecret.pocNamespace" . }}
+  labels:
+    app: {{ .Values.poc.sampleApp.name }}
+    {{- include "tsecret.labels" . | nindent 4 }}
+    app.kubernetes.io/component: poc-sample-app
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "40"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.poc.sampleApp.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.poc.sampleApp.name }}
+    spec:
+      serviceAccountName: {{ .Values.poc.workload.serviceAccountName }}
+      containers:
+        - name: app
+          image: {{ .Values.poc.sampleApp.image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cat /var/run/tsecret/{{ .Values.poc.demo.targetName }}/DB_PASSWORD && sleep 3600
+          volumeMounts:
+            - name: {{ .Values.poc.demo.targetName }}
+              mountPath: /var/run/tsecret/{{ .Values.poc.demo.targetName }}
+              readOnly: true
+      volumes:
+        - name: {{ .Values.poc.demo.targetName }}
+          secret:
+            secretName: {{ .Values.poc.demo.targetName }}
+{{- end }}

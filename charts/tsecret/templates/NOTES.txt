@@ -1,0 +1,44 @@
+TSecret operator installed in namespace {{ include "tsecret.namespace" . }}.
+
+Release: {{ .Release.Name }}
+Chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+App: {{ .Chart.AppVersion }}
+
+Webhook TLS is managed automatically by the operator (no cert-manager required).
+
+{{- if not .Values.injection.enabled }}
+
+Enable injection on application namespaces:
+
+  kubectl label namespace <your-namespace> {{ .Values.injection.labelKey }}={{ .Values.injection.labelValue }} --overwrite
+{{- else if .Values.injection.namespaces }}
+
+Injection enabled on namespaces: {{ join ", " .Values.injection.namespaces }}
+{{- end }}
+
+{{- if .Values.poc.enabled }}
+
+PoC mode is ENABLED — for lab clusters only.
+
+  1. Ensure Vault is reachable at: {{ .Values.poc.vault.existing.address }}
+  2. Wait for bootstrap jobs:
+       kubectl get jobs -n {{ include "tsecret.namespace" . }} -l app.kubernetes.io/instance={{ .Release.Name }}
+  3. Validate sync:
+       kubectl get tsecretsync {{ .Values.poc.demo.syncName }} -n {{ include "tsecret.pocNamespace" . }}
+       kubectl get tsecret {{ .Values.poc.demo.targetName }} -n {{ include "tsecret.pocNamespace" . }}
+{{- if .Values.poc.sampleApp.enabled }}
+  4. Test sample app:
+       kubectl exec deploy/{{ .Values.poc.sampleApp.name }} -n {{ include "tsecret.pocNamespace" . }} -c app -- cat /var/run/tsecret/{{ .Values.poc.demo.targetName }}/DB_PASSWORD
+{{- end }}
+
+See charts/tsecret/README.md for Vault / External Secrets integration options.
+{{- else }}
+
+Production install — next steps:
+
+  1. Label namespaces for injection (see above)
+  2. Create TSecretStore / TSecretSync CRs (or use your GitOps flow)
+  3. Configure encryptionRef (vault-transit recommended)
+
+Documentation: https://github.com/brunoh1n1/TSecret/blob/main/README.md
+{{- end }}
